@@ -488,12 +488,13 @@ configure_pimesh_hardware() {
     sudo mkdir -p /etc/meshtasticd/config.d
     sudo mkdir -p /etc/meshtasticd/available.d
     
-    # Create PiMesh-1W configuration
-    info "Creating PiMesh-1W configuration..."
+    # Create PiMesh-1W reference configuration (for documentation)
+    info "Creating PiMesh-1W reference configuration..."
     
     sudo tee /etc/meshtasticd/available.d/pimesh-1w.yaml > /dev/null << 'EOF'
-# PiMesh-1W (E22-900M30S)
+# PiMesh-1W (E22-900M30S) Reference Configuration
 # https://MeshSmith.net
+# Note: This is a reference file. The actual configuration is in /etc/meshtasticd/config.yaml
 Lora:
   Module: sx1262
   CS: 21
@@ -505,8 +506,8 @@ Lora:
   DIO3_TCXO_VOLTAGE: true
 EOF
     
-    # Activate the PiMesh-1W preset
-    sudo cp /etc/meshtasticd/available.d/pimesh-1w.yaml /etc/meshtasticd/config.d/
+    # Don't copy to config.d since we're using a unified config.yaml
+    info "PiMesh-1W configuration will be included in main config.yaml"
     
     success "PiMesh-1W hardware configured"
     warning "Reboot required for GPIO changes to take effect"
@@ -523,6 +524,18 @@ setup_web_interface() {
 # PiMesh-1W Main Configuration
 # https://MeshSmith.net
 
+# LoRa Radio Configuration (PiMesh-1W with E22-900M30S)
+Lora:
+  Module: sx1262
+  CS: 21
+  IRQ: 16
+  Busy: 20
+  Reset: 18
+  TXen: 13
+  RXen: 12
+  DIO3_TCXO_VOLTAGE: true
+
+# Web Interface Configuration
 Webserver:
   Port: 443
   RootPath: /usr/share/meshtasticd/web
@@ -565,24 +578,33 @@ validate_service() {
         error_exit "Main configuration file missing"
     fi
     
-    if [[ -f /etc/meshtasticd/config.d/pimesh-1w.yaml ]]; then
-        success "PiMesh-1W configuration file exists"
-    else
-        error_exit "PiMesh-1W configuration file missing"
-    fi
-    
-    # Validate YAML syntax
+    # Validate YAML syntax and required sections
     if command -v python3 >/dev/null 2>&1; then
-        if python3 -c "import yaml; yaml.safe_load(open('/etc/meshtasticd/config.yaml'))" 2>/dev/null; then
-            success "Main config YAML syntax is valid"
+        if python3 -c "
+import yaml
+try:
+    with open('/etc/meshtasticd/config.yaml', 'r') as f:
+        config = yaml.safe_load(f)
+    
+    # Check for required sections
+    if 'Lora' not in config:
+        print('ERROR: Missing Lora section')
+        exit(1)
+    if 'Module' not in config['Lora']:
+        print('ERROR: Missing Lora.Module')
+        exit(1)
+    if 'CS' not in config['Lora']:
+        print('ERROR: Missing Lora.CS pin')
+        exit(1)
+    
+    print('Configuration validation passed')
+except Exception as e:
+    print(f'ERROR: {e}')
+    exit(1)
+" 2>/dev/null; then
+            success "Configuration YAML syntax and structure is valid"
         else
-            warning "Main config YAML syntax may be invalid"
-        fi
-        
-        if python3 -c "import yaml; yaml.safe_load(open('/etc/meshtasticd/config.d/pimesh-1w.yaml'))" 2>/dev/null; then
-            success "PiMesh config YAML syntax is valid"
-        else
-            warning "PiMesh config YAML syntax may be invalid"
+            warning "Configuration validation failed - check YAML syntax"
         fi
     fi
     
@@ -669,9 +691,13 @@ Manual Service Test:
   sudo meshtasticd -c /etc/meshtasticd/config.yaml  # Test with config
 
 Configuration Files:
-  Main config: /etc/meshtasticd/config.yaml
-  PiMesh config: /etc/meshtasticd/config.d/pimesh-1w.yaml
+  Main config: /etc/meshtasticd/config.yaml (contains all settings)
+  Reference: /etc/meshtasticd/available.d/pimesh-1w.yaml
   Boot config: /boot/firmware/config.txt
+
+Configuration Validation:
+  sudo meshtasticd -c /etc/meshtasticd/config.yaml --version
+  python3 -c \"import yaml; print(yaml.safe_load(open('/etc/meshtasticd/config.yaml')))\"
 
 Required in /boot/firmware/config.txt:
   dtparam=spi=on                        # Enable SPI
