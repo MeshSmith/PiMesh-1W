@@ -62,6 +62,16 @@ print_header() {
 }
 
 #######################################
+# Debug message
+#######################################
+debug() {
+    if [[ "${DEBUG:-}" == "1" ]]; then
+        print_color "$CYAN" "🔍 DEBUG: $1"
+    fi
+    log "DEBUG: $1"
+}
+
+#######################################
 # Log function
 #######################################
 log() {
@@ -234,8 +244,32 @@ show_menu() {
 # Get user choice
 #######################################
 get_user_choice() {
+    debug "Entering get_user_choice function"
+    debug "Terminal test: $(tty 2>/dev/null || echo 'not a tty')"
+    debug "Interactive test: $([[ -t 0 ]] && echo 'interactive' || echo 'non-interactive')"
+    
     while true; do
-        read -p "Please select an option (1-4): " choice
+        debug "Starting input loop iteration"
+        
+        # Ensure we're reading from the correct stdin
+        if [[ -t 0 ]]; then
+            # Interactive terminal
+            debug "Reading from interactive terminal"
+            read -p "Please select an option (1-4): " choice
+        else
+            # Non-interactive, try to read from /dev/tty
+            debug "Reading from /dev/tty (non-interactive mode)"
+            read -p "Please select an option (1-4): " choice < /dev/tty
+        fi
+        
+        debug "User entered: '$choice'"
+        
+        # Handle empty input
+        if [[ -z "$choice" ]]; then
+            warning "Please enter a valid option."
+            continue
+        fi
+        
         case $choice in
             1)
                 info "Starting full installation..."
@@ -261,6 +295,8 @@ get_user_choice() {
                 ;;
         esac
     done
+    
+    debug "Exiting get_user_choice function"
 }
 
 #######################################
@@ -310,6 +346,7 @@ For support and documentation, visit: https://meshsmith.net
     
     echo
     read -p "Would you like to reboot now? (y/N): " reboot_now
+    reboot_now=${reboot_now:-N}  # Default to N if empty
     case $reboot_now in
         [Yy]*)
             info "Rebooting system..."
@@ -485,6 +522,7 @@ enable_services() {
     
     # Check if we should start meshtasticd now or after reboot
     read -p "Would you like to start Meshtastic daemon now? (y/N): " start_now
+    start_now=${start_now:-N}  # Default to N if empty
     case $start_now in
         [Yy]*)
             info "Starting meshtasticd service..."
@@ -530,8 +568,11 @@ main() {
     echo
     
     # Show menu and get user input
+    log "About to show menu"
     show_menu
+    log "Menu displayed, waiting for user input"
     get_user_choice
+    log "User choice completed"
 }
 
 # Run main function
