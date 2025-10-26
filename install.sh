@@ -412,24 +412,76 @@ configure_pimesh_hardware() {
         boot_config="/boot/config.txt"  # Fallback for older systems
     fi
     
-    # Enable SPI
+    # Enable SPI (required for LoRa radio)
     if ! grep -q "^dtparam=spi=on" "$boot_config"; then
         echo "dtparam=spi=on" | sudo tee -a "$boot_config"
+        info "Added SPI enable to config.txt"
+    else
+        info "SPI already enabled in config.txt"
     fi
     
-    # Enable SPI overlay for chip select
+    # Enable SPI overlay for chip select (required by Meshtastic)
     if ! grep -q "^dtoverlay=spi0-0cs" "$boot_config"; then
         echo "dtoverlay=spi0-0cs" | sudo tee -a "$boot_config"
+        info "Added SPI chip select overlay to config.txt"
+    else
+        info "SPI chip select overlay already enabled in config.txt"
     fi
     
-    # Enable I2C
+    # Enable I2C (for displays and sensors)
     if ! grep -q "^dtparam=i2c_arm=on" "$boot_config"; then
         echo "dtparam=i2c_arm=on" | sudo tee -a "$boot_config"
+        info "Added I2C enable to config.txt"
+    else
+        info "I2C already enabled in config.txt"
     fi
     
-    # Enable UART
+    # Enable UART (for GPS support)
     if ! grep -q "^enable_uart=1" "$boot_config"; then
         echo "enable_uart=1" | sudo tee -a "$boot_config"
+        info "Added UART enable to config.txt"
+    else
+        info "UART already enabled in config.txt"
+    fi
+    
+    # Enable UART overlay for Pi 5 compatibility
+    if [[ "$PI_MODEL" == *"Pi 5"* ]]; then
+        if ! grep -q "^dtoverlay=uart0" "$boot_config"; then
+            echo "dtoverlay=uart0" | sudo tee -a "$boot_config"
+            info "Added UART overlay for Pi 5 to config.txt"
+        else
+            info "UART overlay for Pi 5 already enabled in config.txt"
+        fi
+    fi
+    
+    # Disable serial console (recommended for UART GPS usage)
+    info "Configuring serial console..."
+    if command -v raspi-config >/dev/null 2>&1; then
+        # Use raspi-config if available (preferred method)
+        sudo raspi-config nonint do_serial_cons 1  # Disable Serial Console
+        info "Serial console disabled using raspi-config"
+    else
+        # Fallback: manual configuration
+        if grep -q "console=serial0" /boot/firmware/cmdline.txt 2>/dev/null; then
+            sudo sed -i 's/console=serial0[^ ]* //g' /boot/firmware/cmdline.txt
+            info "Removed serial console from cmdline.txt"
+        elif grep -q "console=serial0" /boot/cmdline.txt 2>/dev/null; then
+            sudo sed -i 's/console=serial0[^ ]* //g' /boot/cmdline.txt
+            info "Removed serial console from cmdline.txt"
+        else
+            info "Serial console already disabled"
+        fi
+    fi
+    
+    # Add user to necessary groups for GPIO/SPI access
+    info "Adding user to gpio and spi groups..."
+    sudo usermod -a -G gpio,spi,i2c "$(whoami)"
+    
+    # Ensure SPI device permissions
+    if [[ -c /dev/spidev0.0 ]]; then
+        success "SPI device /dev/spidev0.0 exists"
+    else
+        warning "SPI device not yet available (will be created after reboot)"
     fi
     
     # Create Meshtastic configuration directories
@@ -474,11 +526,6 @@ setup_web_interface() {
 Webserver:
   Port: 443
   RootPath: /usr/share/meshtasticd/web
-  
-# Additional web interface settings
-Serial:
-  Enabled: true
-  Echo: true
 EOF
     
     # Setup Avahi service for network discovery
@@ -506,10 +553,152 @@ EOF
 }
 
 #######################################
+# Validate Meshtastic service
+#######################################
+validate_service() {
+    info "Validating Meshtastic service configuration..."
+    
+    # Check if config files exist
+    if [[ -f /etc/meshtasticd/config.yaml ]]; then
+        success "Main configuration file exists"
+    else
+        error_exit "Main configuration file missing"
+    fi
+    
+    if [[ -f /etc/meshtasticd/config.d/pimesh-1w.yaml ]]; then
+        success "PiMesh-1W configuration file exists"
+    else
+        error_exit "PiMesh-1W configuration file missing"
+    fi
+    
+    # Validate YAML syntax
+    if command -v python3 >/dev/null 2>&1; then
+        if python3 -c "import yaml; yaml.safe_load(open('/etc/meshtasticd/config.yaml'))" 2>/dev/null; then
+            success "Main config YAML syntax is valid"
+        else
+            warning "Main config YAML syntax may be invalid"
+        fi
+        
+        if python3 -c "import yaml; yaml.safe_load(open('/etc/meshtasticd/config.d/pimesh-1w.yaml'))" 2>/dev/null; then
+            success "PiMesh config YAML syntax is valid"
+        else
+            warning "PiMesh config YAML syntax may be invalid"
+        fi
+    fi
+    
+    # Check service status
+    if systemctl is-enabled --quiet meshtasticd; then
+        success "Meshtastic service is enabled"
+    else
+        warning "Meshtastic service is not enabled"
+    fi
+    
+    # Check GPIO groups
+    if groups "$(whoami)" | grep -q gpio; then
+        success "User is in gpio group"
+    else
+        warning "User is not in gpio group (logout/login required)"
+    fi
+    
+    if groups "$(whoami)" | grep -q spi; then
+        success "User is in spi group"
+    else
+        warning "User is not in spi group (logout/login required)"
+    fi
+    
+    # Validate GPIO interface configuration
+    local boot_config="/boot/firmware/config.txt"
+    if [[ ! -f "$boot_config" ]]; then
+        boot_config="/boot/config.txt"
+    fi
+    
+    if [[ -f "$boot_config" ]]; then
+        if grep -q "^dtparam=spi=on" "$boot_config"; then
+            success "SPI enabled in config.txt"
+        else
+            warning "SPI not enabled in config.txt"
+        fi
+        
+        if grep -q "^dtoverlay=spi0-0cs" "$boot_config"; then
+            success "SPI chip select overlay enabled in config.txt"
+        else
+            warning "SPI chip select overlay not enabled in config.txt"
+        fi
+        
+        if grep -q "^dtparam=i2c_arm=on" "$boot_config"; then
+            success "I2C enabled in config.txt"
+        else
+            warning "I2C not enabled in config.txt"
+        fi
+        
+        if grep -q "^enable_uart=1" "$boot_config"; then
+            success "UART enabled in config.txt"
+        else
+            warning "UART not enabled in config.txt"
+        fi
+        
+        if [[ "$PI_MODEL" == *"Pi 5"* ]] && grep -q "^dtoverlay=uart0" "$boot_config"; then
+            success "Pi 5 UART overlay enabled in config.txt"
+        elif [[ "$PI_MODEL" == *"Pi 5"* ]]; then
+            warning "Pi 5 UART overlay not enabled in config.txt"
+        fi
+    else
+        warning "Config.txt not found"
+    fi
+}
+
+#######################################
+# Show troubleshooting information
+#######################################
+show_troubleshooting() {
+    print_color "$YELLOW" "
+🔧 Troubleshooting Information:
+
+Service Commands:
+  sudo systemctl status meshtasticd     # Check service status
+  sudo journalctl -u meshtasticd -f     # View live logs
+  sudo journalctl -u meshtasticd -b     # View logs since boot
+
+Hardware Validation:
+  ls -la /dev/spidev*                   # Check SPI devices
+  ls -la /dev/i2c*                      # Check I2C devices
+  ls -la /dev/ttyAMA0 /dev/ttyS0        # Check UART devices
+
+Manual Service Test:
+  sudo meshtasticd --help               # Test binary
+  sudo meshtasticd -c /etc/meshtasticd/config.yaml  # Test with config
+
+Configuration Files:
+  Main config: /etc/meshtasticd/config.yaml
+  PiMesh config: /etc/meshtasticd/config.d/pimesh-1w.yaml
+  Boot config: /boot/firmware/config.txt
+
+Required in /boot/firmware/config.txt:
+  dtparam=spi=on                        # Enable SPI
+  dtoverlay=spi0-0cs                    # Enable SPI chip select
+  dtparam=i2c_arm=on                    # Enable I2C
+  enable_uart=1                         # Enable UART
+  dtoverlay=uart0                       # Pi 5 only
+
+Common Issues:
+  1. ❗ Reboot required after config.txt changes
+  2. ❗ User must logout/login after group changes
+  3. ❗ Serial console interferes with GPS UART
+  4. ❗ Check radio module wiring to GPIO pins
+
+Documentation:
+  📖 https://meshtastic.org/docs/hardware/devices/linux-native-hardware/?os=debian
+"
+}
+
+#######################################
 # Enable services
 #######################################
 enable_services() {
     info "Enabling auto-start services..."
+    
+    # Validate configuration before enabling services
+    validate_service
     
     # Enable and start Meshtastic daemon
     info "Enabling meshtasticd service..."
@@ -535,9 +724,12 @@ enable_services() {
                     success "Service is running properly"
                 else
                     warning "Service may need a reboot to function properly due to GPIO requirements"
+                    show_troubleshooting
                 fi
             else
-                warning "Failed to start service - reboot may be required for GPIO access"
+                warning "Failed to start service - this is expected before reboot"
+                info "The service will start automatically after reboot when GPIO interfaces are available"
+                show_troubleshooting
             fi
             ;;
         *)
