@@ -524,7 +524,47 @@ setup_web_interface() {
 # PiMesh-1W Main Configuration
 # https://MeshSmith.net
 
-# LoRa Radio Configuration (PiMesh-1W with E22-900M30S)
+# Web Interface Configuration
+Webserver:
+  Port: 443
+  RootPath: /usr/share/meshtasticd/web
+EOF
+
+    # Check for available presets and use proper config.d approach
+    info "Checking available LoRa presets..."
+    if [[ -d /etc/meshtasticd/available.d ]]; then
+        info "Available preset configurations:"
+        ls -la /etc/meshtasticd/available.d/ || true
+        
+        # Look for SX1262 or similar presets
+        if ls /etc/meshtasticd/available.d/lora-*1262* 2>/dev/null; then
+            info "Found SX1262 preset configurations"
+            # Use the first SX1262 preset as a base
+            local preset=$(ls /etc/meshtasticd/available.d/lora-*1262* | head -1)
+            info "Using preset: $preset"
+            sudo cp "$preset" /etc/meshtasticd/config.d/lora-radio.yaml
+            
+            # Modify the preset for PiMesh-1W pin mapping
+            sudo sed -i 's/CS: .*/CS: 21/' /etc/meshtasticd/config.d/lora-radio.yaml
+            sudo sed -i 's/IRQ: .*/IRQ: 16/' /etc/meshtasticd/config.d/lora-radio.yaml
+            sudo sed -i 's/Busy: .*/Busy: 20/' /etc/meshtasticd/config.d/lora-radio.yaml
+            sudo sed -i 's/Reset: .*/Reset: 18/' /etc/meshtasticd/config.d/lora-radio.yaml
+            
+            # Add PiMesh-1W specific pins if not present
+            if ! grep -q "TXen:" /etc/meshtasticd/config.d/lora-radio.yaml; then
+                echo "  TXen: 13" | sudo tee -a /etc/meshtasticd/config.d/lora-radio.yaml
+            fi
+            if ! grep -q "RXen:" /etc/meshtasticd/config.d/lora-radio.yaml; then
+                echo "  RXen: 12" | sudo tee -a /etc/meshtasticd/config.d/lora-radio.yaml
+            fi
+            
+            success "Configured LoRa radio using preset with PiMesh-1W pin mapping"
+        else
+            warning "No SX1262 presets found, creating custom configuration"
+            # Fallback to our custom configuration in config.d
+            sudo tee /etc/meshtasticd/config.d/pimesh-1w.yaml > /dev/null << 'EOF'
+# PiMesh-1W (E22-900M30S) Configuration
+# https://MeshSmith.net
 Lora:
   Module: sx1262
   CS: 21
@@ -534,12 +574,26 @@ Lora:
   TXen: 13
   RXen: 12
   DIO3_TCXO_VOLTAGE: true
-
-# Web Interface Configuration
-Webserver:
-  Port: 443
-  RootPath: /usr/share/meshtasticd/web
 EOF
+        fi
+    else
+        warning "No available.d directory found, using fallback configuration"
+        # Create config.d structure and add our config
+        sudo mkdir -p /etc/meshtasticd/config.d
+        sudo tee /etc/meshtasticd/config.d/pimesh-1w.yaml > /dev/null << 'EOF'
+# PiMesh-1W (E22-900M30S) Configuration
+# https://MeshSmith.net
+Lora:
+  Module: sx1262
+  CS: 21
+  IRQ: 16
+  Busy: 20
+  Reset: 18
+  TXen: 13
+  RXen: 12
+  DIO3_TCXO_VOLTAGE: true
+EOF
+    fi
     
     # Setup Avahi service for network discovery
     info "Configuring network discovery..."
@@ -566,10 +620,92 @@ EOF
 }
 
 #######################################
+# Debug configuration issues
+#######################################
+debug_configuration() {
+    info "Running comprehensive configuration debugging..."
+    
+    # Check if config file exists and is readable
+    if [[ -f /etc/meshtasticd/config.yaml ]]; then
+        success "Configuration file exists"
+        
+        # Show file permissions
+        info "Config file permissions: $(ls -la /etc/meshtasticd/config.yaml)"
+        
+        # Show file contents
+        info "Current configuration contents:"
+        echo "--- CONFIG START ---"
+        cat /etc/meshtasticd/config.yaml
+        echo "--- CONFIG END ---"
+        
+        # Test YAML parsing
+        if command -v python3 >/dev/null 2>&1; then
+            info "Testing YAML syntax..."
+            python3 -c "
+import yaml
+import sys
+try:
+    with open('/etc/meshtasticd/config.yaml', 'r') as f:
+        config = yaml.safe_load(f)
+    print('YAML syntax is valid')
+    print('Parsed configuration:')
+    print(yaml.dump(config, default_flow_style=False))
+    
+    # Check specific sections
+    if 'Lora' in config:
+        print('✓ Lora section found')
+        lora = config['Lora']
+        required_fields = ['Module', 'CS', 'IRQ', 'Busy', 'Reset']
+        for field in required_fields:
+            if field in lora:
+                print(f'✓ Lora.{field}: {lora[field]}')
+            else:
+                print(f'✗ Missing Lora.{field}')
+    else:
+        print('✗ Lora section missing')
+        
+    if 'Webserver' in config:
+        print('✓ Webserver section found')
+    else:
+        print('✗ Webserver section missing')
+        
+except Exception as e:
+    print(f'YAML parsing error: {e}')
+    sys.exit(1)
+"
+        else
+            warning "Python3 not available for YAML validation"
+        fi
+        
+        # Test meshtasticd config loading
+        info "Testing meshtasticd configuration loading..."
+        if sudo meshtasticd --help >/dev/null 2>&1; then
+            success "meshtasticd binary is working"
+            
+            # Try to validate config without starting
+            info "Attempting to validate configuration with meshtasticd..."
+            if timeout 10 sudo meshtasticd -c /etc/meshtasticd/config.yaml --version 2>&1; then
+                success "Configuration validation passed"
+            else
+                warning "Configuration validation failed or timed out"
+            fi
+        else
+            error_exit "meshtasticd binary is not working"
+        fi
+        
+    else
+        error_exit "Configuration file does not exist"
+    fi
+}
+
+#######################################
 # Validate Meshtastic service
 #######################################
 validate_service() {
     info "Validating Meshtastic service configuration..."
+    
+    # Run comprehensive debugging
+    debug_configuration
     
     # Check if config files exist
     if [[ -f /etc/meshtasticd/config.yaml ]]; then
@@ -741,20 +877,33 @@ enable_services() {
     case $start_now in
         [Yy]*)
             info "Starting meshtasticd service..."
+            
+            # Clear any previous failed state
+            sudo systemctl reset-failed meshtasticd 2>/dev/null || true
+            
+            # Try to start the service
             if sudo systemctl start meshtasticd; then
-                success "Meshtastic daemon started successfully"
+                success "Meshtastic daemon start command succeeded"
                 
-                # Wait a moment and check status
-                sleep 3
-                if sudo systemctl is-active --quiet meshtasticd; then
-                    success "Service is running properly"
-                else
-                    warning "Service may need a reboot to function properly due to GPIO requirements"
-                    show_troubleshooting
-                fi
+                # Wait and check status multiple times
+                for i in {1..10}; do
+                    sleep 1
+                    if sudo systemctl is-active --quiet meshtasticd; then
+                        success "Service is running properly after ${i} seconds"
+                        break
+                    elif [[ $i -eq 10 ]]; then
+                        warning "Service failed to start or crashed"
+                        info "Showing recent logs:"
+                        sudo journalctl -u meshtasticd --no-pager -n 20
+                        show_troubleshooting
+                        break
+                    fi
+                done
             else
-                warning "Failed to start service - this is expected before reboot"
-                info "The service will start automatically after reboot when GPIO interfaces are available"
+                warning "Failed to start service"
+                info "Showing service status and logs:"
+                sudo systemctl status meshtasticd --no-pager -l
+                sudo journalctl -u meshtasticd --no-pager -n 20
                 show_troubleshooting
             fi
             ;;
